@@ -25,15 +25,40 @@ function Invoke-NativeCommand {
         [string[]] $Arguments
     )
 
-    $output = & $FilePath @Arguments 2>&1
-    $exitCode = $LASTEXITCODE
+    # Use System.Diagnostics.Process instead of directly invoking native commands.
+    # This avoids PowerShell treating normal stderr output from tools like git
+    # as a NativeCommandError when $ErrorActionPreference = 'Stop'.
+    $processStartInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $processStartInfo.FileName = $FilePath
+    $processStartInfo.UseShellExecute = $false
+    $processStartInfo.RedirectStandardOutput = $true
+    $processStartInfo.RedirectStandardError = $true
+    $processStartInfo.CreateNoWindow = $true
 
-    if ($output) {
-        $output | ForEach-Object { Write-Host $_ }
+    foreach ($argument in $Arguments) {
+        [void]$processStartInfo.ArgumentList.Add($argument)
     }
 
-    if ($exitCode -ne 0) {
-        throw "Command failed with exit code $exitCode`: $FilePath $($Arguments -join ' ')"
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $processStartInfo
+
+    [void]$process.Start()
+
+    $standardOutput = $process.StandardOutput.ReadToEnd()
+    $standardError = $process.StandardError.ReadToEnd()
+
+    $process.WaitForExit()
+
+    if (-not [string]::IsNullOrWhiteSpace($standardOutput)) {
+        Write-Host $standardOutput.TrimEnd()
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($standardError)) {
+        Write-Host $standardError.TrimEnd()
+    }
+
+    if ($process.ExitCode -ne 0) {
+        throw "Command failed with exit code $($process.ExitCode): $FilePath $($Arguments -join ' ')"
     }
 }
 
@@ -43,7 +68,7 @@ function Remove-JsonComments {
         [string] $Json
     )
 
-    $result = New-Object System.Text.StringBuilder
+    $result = [System.Text.StringBuilder]::new()
     $inString = $false
     $escaped = $false
     $i = 0
@@ -117,7 +142,7 @@ function Remove-TrailingJsonCommas {
         [string] $Json
     )
 
-    $result = New-Object System.Text.StringBuilder
+    $result = [System.Text.StringBuilder]::new()
     $inString = $false
     $escaped = $false
     $i = 0
@@ -185,7 +210,7 @@ if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
 Write-Host "Cloning or updating Skyline GitHub Copilot skills..." -ForegroundColor Cyan
 
 if (Test-Path (Join-Path $sourceRepoDir '.git')) {
-    Invoke-NativeCommand -FilePath 'git' -Arguments @('-C', $sourceRepoDir, 'pull', '--ff-only')
+    Invoke-NativeCommand -FilePath 'git' -Arguments @('-C', $sourceRepoDir, 'pull', '--ff-only', '--quiet')
 }
 elseif (Test-Path $sourceRepoDir) {
     $existingItems = Get-ChildItem -Path $sourceRepoDir -Force | Select-Object -First 1
@@ -194,10 +219,10 @@ elseif (Test-Path $sourceRepoDir) {
         throw "Target directory already exists and is not an empty Git repository: $sourceRepoDir"
     }
 
-    Invoke-NativeCommand -FilePath 'git' -Arguments @('clone', $repoUrl, $sourceRepoDir)
+    Invoke-NativeCommand -FilePath 'git' -Arguments @('clone', '--quiet', $repoUrl, $sourceRepoDir)
 }
 else {
-    Invoke-NativeCommand -FilePath 'git' -Arguments @('clone', $repoUrl, $sourceRepoDir)
+    Invoke-NativeCommand -FilePath 'git' -Arguments @('clone', '--quiet', $repoUrl, $sourceRepoDir)
 }
 
 if (-not (Test-Path $skillsDir)) {
@@ -268,5 +293,5 @@ else {
 Write-Host ""
 Write-Host "Done." -ForegroundColor Green
 Write-Host "Settings file: $settingsPath"
-Write-Host "In an existing Copilot CLI session, run: /skills reload"
-Write-Host "Then verify with: /skills list"
+Write-Host "Restart Copilot CLI to load the updated skillDirectories setting."
+Write-Host "After restarting, verify with: /skills list"
