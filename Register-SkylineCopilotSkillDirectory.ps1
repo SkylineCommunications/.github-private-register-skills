@@ -1,223 +1,24 @@
 $ErrorActionPreference = 'Stop'
 
 # This script:
-# - Clones or updates the SkylineCommunications/.github-private repository to:
-#   C:\Skyline GitHub Copilot Skills
-# - Adds C:\Skyline GitHub Copilot Skills\skills to the user's Copilot CLI settings.json
-# - Does not store credentials, tokens, or passwords
-# - Requires the user to already have Git access to the private repository
-# - Preserves existing skillDirectories entries and only adds the Skyline path if missing
-# - Creates $HOME\.copilot and $HOME\.copilot\settings.json if they do not exist yet
+# - Adds the shared Skyline Copilot skills directory to the user's Copilot CLI settings.json
+# - Does not clone, copy, or update any files
+# - Preserves existing settings and existing skillDirectories entries
+# - Creates $HOME\.copilot and settings.json if they do not exist yet
 # - Supports Windows PowerShell 5.1 and PowerShell 7+
 
-$repoUrl = 'https://github.com/SkylineCommunications/.github-private.git'
-$sourceRepoDir = 'C:\Skyline GitHub Copilot Skills'
-$skillsDir = Join-Path $sourceRepoDir 'skills'
+$skillDirectoryToAdd = '\\SLC-NAS-01.skyline.local\Shares\Public\Skyline Copilot Skills\.github-private\skills'
 
 $copilotSettingsDir = Join-Path $HOME '.copilot'
 $settingsPath = Join-Path $copilotSettingsDir 'settings.json'
 
-function Invoke-SkylineNativeCommand {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string] $FilePath,
-
-        [Parameter(Mandatory = $true)]
-        [string[]] $Arguments
-    )
-
-    # Native tools like git often write normal progress output to stderr.
-    # With $ErrorActionPreference = 'Stop', PowerShell can treat that stderr output
-    # as a terminating NativeCommandError even when the command succeeded.
-    # Temporarily use Continue here and rely on the native process exit code instead.
-    $previousErrorActionPreference = $ErrorActionPreference
-
-    try {
-        $ErrorActionPreference = 'Continue'
-
-        $output = & $FilePath @Arguments 2>&1
-        $exitCode = $LASTEXITCODE
-    }
-    finally {
-        $ErrorActionPreference = $previousErrorActionPreference
-    }
-
-    if ($output) {
-        $output | ForEach-Object {
-            Write-Host $_
-        }
-    }
-
-    if ($exitCode -ne 0) {
-        throw "Command failed with exit code $exitCode`: $FilePath $($Arguments -join ' ')"
-    }
-}
-
-function Remove-JsonComments {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string] $Json
-    )
-
-    $result = New-Object System.Text.StringBuilder
-    $inString = $false
-    $escaped = $false
-    $i = 0
-
-    while ($i -lt $Json.Length) {
-        $char = $Json[$i]
-        $next = if ($i + 1 -lt $Json.Length) { $Json[$i + 1] } else { [char]0 }
-
-        if ($inString) {
-            [void]$result.Append($char)
-
-            if ($escaped) {
-                $escaped = $false
-            }
-            elseif ($char -eq '\') {
-                $escaped = $true
-            }
-            elseif ($char -eq '"') {
-                $inString = $false
-            }
-
-            $i++
-            continue
-        }
-
-        if ($char -eq '"') {
-            $inString = $true
-            [void]$result.Append($char)
-            $i++
-            continue
-        }
-
-        if ($char -eq '/' -and $next -eq '/') {
-            while ($i -lt $Json.Length -and $Json[$i] -ne "`n") {
-                $i++
-            }
-
-            if ($i -lt $Json.Length) {
-                [void]$result.Append("`n")
-                $i++
-            }
-
-            continue
-        }
-
-        if ($char -eq '/' -and $next -eq '*') {
-            $i += 2
-
-            while ($i + 1 -lt $Json.Length -and -not ($Json[$i] -eq '*' -and $Json[$i + 1] -eq '/')) {
-                if ($Json[$i] -eq "`n") {
-                    [void]$result.Append("`n")
-                }
-
-                $i++
-            }
-
-            $i += 2
-            continue
-        }
-
-        [void]$result.Append($char)
-        $i++
-    }
-
-    return $result.ToString()
-}
-
-function Remove-TrailingJsonCommas {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string] $Json
-    )
-
-    $result = New-Object System.Text.StringBuilder
-    $inString = $false
-    $escaped = $false
-    $i = 0
-
-    while ($i -lt $Json.Length) {
-        $char = $Json[$i]
-
-        if ($inString) {
-            [void]$result.Append($char)
-
-            if ($escaped) {
-                $escaped = $false
-            }
-            elseif ($char -eq '\') {
-                $escaped = $true
-            }
-            elseif ($char -eq '"') {
-                $inString = $false
-            }
-
-            $i++
-            continue
-        }
-
-        if ($char -eq '"') {
-            $inString = $true
-            [void]$result.Append($char)
-            $i++
-            continue
-        }
-
-        if ($char -eq ',') {
-            $lookAhead = $i + 1
-
-            while ($lookAhead -lt $Json.Length -and [char]::IsWhiteSpace($Json[$lookAhead])) {
-                $lookAhead++
-            }
-
-            if ($lookAhead -lt $Json.Length -and ($Json[$lookAhead] -eq '}' -or $Json[$lookAhead] -eq ']')) {
-                $i++
-                continue
-            }
-        }
-
-        [void]$result.Append($char)
-        $i++
-    }
-
-    return $result.ToString()
-}
-
-function Normalize-SkylinePathForComparison {
+function Normalize-PathForComparison {
     param(
         [Parameter(Mandatory = $true)]
         [string] $Path
     )
 
     return $Path.Trim().TrimEnd('\', '/').ToLowerInvariant()
-}
-
-if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
-    throw "Git was not found. Please install Git and try again."
-}
-
-Write-Host "Cloning or updating Skyline GitHub Copilot skills..." -ForegroundColor Cyan
-
-if (Test-Path (Join-Path $sourceRepoDir '.git')) {
-    Invoke-SkylineNativeCommand -FilePath 'git' -Arguments @('-C', $sourceRepoDir, 'pull', '--ff-only', '--quiet')
-}
-elseif (Test-Path $sourceRepoDir) {
-    $existingItems = Get-ChildItem -Path $sourceRepoDir -Force | Select-Object -First 1
-
-    if ($existingItems) {
-        throw "Target directory already exists and is not an empty Git repository: $sourceRepoDir"
-    }
-
-    Invoke-SkylineNativeCommand -FilePath 'git' -Arguments @('clone', '--quiet', $repoUrl, $sourceRepoDir)
-}
-else {
-    Invoke-SkylineNativeCommand -FilePath 'git' -Arguments @('clone', '--quiet', $repoUrl, $sourceRepoDir)
-}
-
-if (-not (Test-Path $skillsDir)) {
-    throw "Expected skills folder was not found: $skillsDir"
 }
 
 Write-Host "Updating Copilot settings..." -ForegroundColor Cyan
@@ -234,14 +35,11 @@ if ([string]::IsNullOrWhiteSpace($rawSettings)) {
     $rawSettings = '{}'
 }
 
-$jsonWithoutComments = Remove-JsonComments -Json $rawSettings
-$jsonWithoutTrailingCommas = Remove-TrailingJsonCommas -Json $jsonWithoutComments
-
 try {
-    $settings = $jsonWithoutTrailingCommas | ConvertFrom-Json
+    $settings = $rawSettings | ConvertFrom-Json
 }
 catch {
-    throw "Could not parse Copilot settings file: $settingsPath. The file may contain invalid JSON/JSONC."
+    throw "Could not parse Copilot settings file: $settingsPath. Please check that it contains valid JSON."
 }
 
 if (-not $settings) {
@@ -254,17 +52,18 @@ if ($settings.PSObject.Properties.Name -contains 'skillDirectories' -and $null -
     $existingSkillDirectories = @($settings.skillDirectories)
 }
 
-$normalizedExistingDirectories = $existingSkillDirectories |
+$normalizedExistingSkillDirectories = $existingSkillDirectories |
     Where-Object { $null -ne $_ } |
-    ForEach-Object { Normalize-SkylinePathForComparison -Path $_ }
+    ForEach-Object { Normalize-PathForComparison -Path $_ }
 
-$normalizedSkillsDir = Normalize-SkylinePathForComparison -Path $skillsDir
+$normalizedSkillDirectoryToAdd = Normalize-PathForComparison -Path $skillDirectoryToAdd
 
-if ($normalizedExistingDirectories -contains $normalizedSkillsDir) {
-    Write-Host "Skill directory already exists in settings.json: $skillsDir" -ForegroundColor Yellow
+if ($normalizedExistingSkillDirectories -contains $normalizedSkillDirectoryToAdd) {
+    Write-Host "Skill directory already exists in settings.json:" -ForegroundColor Yellow
+    Write-Host $skillDirectoryToAdd
 }
 else {
-    $updatedSkillDirectories = @($existingSkillDirectories) + $skillsDir
+    $updatedSkillDirectories = @($existingSkillDirectories) + $skillDirectoryToAdd
 
     if ($settings.PSObject.Properties.Name -contains 'skillDirectories') {
         $settings.skillDirectories = $updatedSkillDirectories
@@ -280,7 +79,8 @@ else {
         ConvertTo-Json -Depth 20 |
         Set-Content -Path $settingsPath -Encoding UTF8
 
-    Write-Host "Added skill directory to settings.json: $skillsDir" -ForegroundColor Green
+    Write-Host "Added skill directory to settings.json:" -ForegroundColor Green
+    Write-Host $skillDirectoryToAdd
     Write-Host "Previous settings backed up to: $backupPath"
 }
 
